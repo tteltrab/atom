@@ -10,7 +10,6 @@ TextEditor = require './text-editor'
 PaneContainer = require './pane-container'
 Panel = require './panel'
 PanelContainer = require './panel-container'
-Task = require './task'
 
 # Essential: Represents the state of the user interface for the entire window.
 # An instance of this class is available via the `atom.workspace` global.
@@ -92,7 +91,7 @@ class Workspace extends Model
     @directorySearchers = []
     serviceHub.consume(
       'atom.directory-searcher',
-      '^0.1.0',
+      '>=0.1.0',
       (provider) => @directorySearchers.unshift(provider))
 
   # Called by the Serializable mixin during serialization.
@@ -975,20 +974,7 @@ class Workspace extends Model
       iterator = options
       options = {}
 
-    # Find a searcher for every Directory in the project. Each searcher that is matched
-    # will be associated with an Array of Directory objects in the Map.
-    directoriesForSearcher = new Map()
-    for directory in @project.getDirectories()
-      searcher = @defaultDirectorySearcher
-      for directorySearcher in @directorySearchers
-        if directorySearcher.canSearchDirectory(directory)
-          searcher = directorySearcher
-          break
-      directories = directoriesForSearcher.get(searcher)
-      unless directories
-        directories = []
-        directoriesForSearcher.set(searcher, directories)
-      directories.push(directory)
+    directoriesForSearcher = @getDirectoriesBySearcher()
 
     # Define the onPathsSearched callback.
     if _.isFunction(options.onPathsSearched)
@@ -1077,29 +1063,60 @@ class Workspace extends Model
       openPaths = (buffer.getPath() for buffer in @project.getBuffers())
       outOfProcessPaths = _.difference(filePaths, openPaths)
 
-      inProcessFinished = not openPaths.length
-      outOfProcessFinished = not outOfProcessPaths.length
-      checkFinished = ->
-        resolve() if outOfProcessFinished and inProcessFinished
+      if outOfProcessPaths.length
+        # Group paths by directory searcher.
+        # The common case is that all directories map to the same searcher
+        # (e.g. if no custom searcher is provided) so add a fast-path.
+        directorySearcherPaths = new Map
+        directoriesForSearcher = @getDirectoriesBySearcher()
+        if Object.keys(directoriesForSearcher).length is 1
+          searcher = Object.keys(directoriesForSearcher)[0]
+          directorySearcherPaths.set(searcher, outOfProcessPaths)
+        else
+          for filePath in outOfProcessPaths
+            directorySearcher = @defaultDirectorySearcher
+            for [searcher, directories] in Array.from(directoriesForSearcher)
+              if searcher.replace?
+                for directory in directories
+                  if directory.contains(filePath)
+                    directorySearcher = searcher
+                    break
+            paths = directorySearcherPaths.get(directorySearcher)
+            unless paths
+              paths = []
+              directorySearcherPaths.set(directorySearcher, paths)
+            paths.push(filePath)
 
-      unless outOfProcessFinished.length
-        flags = 'g'
-        flags += 'i' if regex.ignoreCase
-
-        task = Task.once require.resolve('./replace-handler'), outOfProcessPaths, regex.source, flags, replacementText, ->
-          outOfProcessFinished = true
-          checkFinished()
-
-        task.on 'replace:path-replaced', iterator
-        task.on 'replace:file-error', (error) -> iterator(null, error)
+        outOfProcessPromise = Promise.all (
+          for [directorySearcher, paths] in Array.from(directorySearcherPaths)
+            directorySearcher.replace(paths, regex, replacementText, iterator)
+        )
+      else
+        outOfProcessPromise = Promise.resolve()
 
       for buffer in @project.getBuffers()
         continue unless buffer.getPath() in filePaths
         replacements = buffer.replace(regex, replacementText, iterator)
         iterator({filePath: buffer.getPath(), replacements}) if replacements
 
-      inProcessFinished = true
-      checkFinished()
+      outOfProcessPromise.then(resolve, reject)
+
+  # Find a searcher for every Directory in the project. Each searcher that is matched
+  # will be associated with an Array of Directory objects in the returned Map.
+  getDirectoriesBySearcher: (directory) ->
+    directoriesForSearcher = new Map()
+    for directory in @project.getDirectories()
+      searcher = @defaultDirectorySearcher
+      for directorySearcher in @directorySearchers
+        if directorySearcher.canSearchDirectory(directory)
+          searcher = directorySearcher
+          break
+      directories = directoriesForSearcher.get(searcher)
+      unless directories
+        directories = []
+        directoriesForSearcher.set(searcher, directories)
+      directories.push(directory)
+    return directoriesForSearcher
 
   checkoutHeadRevision: (editor) ->
     if editor.getPath()

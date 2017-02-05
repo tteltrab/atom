@@ -1403,7 +1403,7 @@ describe "Workspace", ->
           beforeEach ->
             fakeSearch = null
             onFakeSearchCreated = null
-            atom.packages.serviceHub.provide('atom.directory-searcher', '0.1.0', {
+            atom.packages.serviceHub.provide('atom.directory-searcher', '0.2.0', {
               canSearchDirectory: (directory) -> directory.getPath() is dir1
               search: (directory, regex, options) -> fakeSearch = new FakeSearch(options)
             })
@@ -1466,7 +1466,7 @@ describe "Workspace", ->
           it "will have the side-effect of failing the overall search if it fails", ->
             # This provider's search should be cancelled when the first provider fails
             fakeSearch2 = null
-            atom.packages.serviceHub.provide('atom.directory-searcher', '0.1.0', {
+            atom.packages.serviceHub.provide('atom.directory-searcher', '0.2.0', {
               canSearchDirectory: (directory) -> directory.getPath() is dir2
               search: (directory, regex, options) -> fakeSearch2 = new FakeSearch(options)
             })
@@ -1586,6 +1586,40 @@ describe "Workspace", ->
           expect(results[0].replacements).toBe 6
 
           expect(editor.isModified()).toBeTruthy()
+
+    describe "when a custom directory searcher is registered", ->
+      tempDir = null
+
+      beforeEach ->
+        tempDir = temp.mkdirSync('fake-dir')
+        atom.project.addPath(tempDir)
+
+        # Just a mock
+        atom.packages.serviceHub.provide('atom.directory-searcher', '0.2.0', {
+          canSearchDirectory: (directory) -> directory.getPath() is tempDir
+          replace: (files, regex, replacement, iterator) ->
+            iterator({
+              filePath: files[0],
+              replacements: 123,
+            })
+        })
+
+        waitsFor ->
+          atom.workspace.directorySearchers.length > 0
+
+      it "calls the custom replace function", ->
+        results = []
+        tempFile = path.join(tempDir, 'test')
+
+        waitsForPromise ->
+          atom.workspace.replace /items/gi, 'items', [filePath, tempFile], (result) ->
+            results.push(result)
+
+        runs ->
+          expect(results).toEqual [
+            {filePath: tempFile, replacements: 123},
+            {filePath: filePath, replacements: 6},
+          ]
 
   describe "::saveActivePaneItem()", ->
     editor = null
